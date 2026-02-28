@@ -264,7 +264,7 @@ class SoulmaneBot(discord.Client):
         await self.slskd.close()
         await super().close()
 
-    @app_commands.command(name="smdownload", description="Download media via slskd batch (keep one winner, cancel duplicates)")
+    @app_commands.command(name="dlmovie", description="Download media via slskd batch (keep one winner, cancel duplicates)")
     async def download(self, interaction: discord.Interaction, query: str):
         await interaction.response.defer(thinking=True)
         msg = await interaction.followup.send(f"🔎 Starting search for: `{query}`", wait=True)
@@ -366,7 +366,7 @@ class SoulmaneBot(discord.Client):
             self.db.set_job_state(job_id, "failed", str(e))
             await msg.edit(content=f"❌ Job `{job_id}` failed: `{e}`")
 
-    @app_commands.command(name="smstatus", description="Show latest job or specific job status")
+    @app_commands.command(name="jobstatus", description="Show latest job or specific job status")
     async def status(self, interaction: discord.Interaction, job_id: int | None = None):
         await interaction.response.defer(thinking=True, ephemeral=True)
         job = self.db.job(job_id) if job_id else self.db.latest_job()
@@ -389,7 +389,7 @@ class SoulmaneBot(discord.Client):
             )
         await interaction.followup.send("\n".join(lines), ephemeral=True)
 
-    @app_commands.command(name="smcancel", description="Cancel all transfers for a job")
+    @app_commands.command(name="jobcancel", description="Cancel all transfers for a job")
     async def cancel(self, interaction: discord.Interaction, job_id: int):
         await interaction.response.defer(thinking=True)
         job = self.db.job(job_id)

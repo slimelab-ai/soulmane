@@ -31,12 +31,12 @@ python bot.py
 
 ## Commands
 
-- `/smdownload <query>`
+- `/dlmovie <query>`
   - Runs slskd batch strategy: enqueue multiple peers, pick first healthy transfer, cancel the rest.
   - Does **not** claim success without transfer evidence.
-- `/smstatus [job_id]`
+- `/jobstatus [job_id]`
   - Shows latest job (or specific job) state + transfer bytes/states.
-- `/smcancel <job_id>`
+- `/jobcancel <job_id>`
   - Cancels all tracked transfer IDs for that job.
 
 ## Behavior guarantees
