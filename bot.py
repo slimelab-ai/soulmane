@@ -138,14 +138,21 @@ class JobsDB:
 class SlskdClient:
     def __init__(self, config: Config):
         self.c = config
-        self.s = aiohttp.ClientSession()
+        self.s: aiohttp.ClientSession | None = None
         self.token: str | None = None
 
+    async def ensure_session(self) -> aiohttp.ClientSession:
+        if self.s is None or self.s.closed:
+            self.s = aiohttp.ClientSession()
+        return self.s
+
     async def close(self):
-        await self.s.close()
+        if self.s and not self.s.closed:
+            await self.s.close()
 
     async def login(self) -> None:
-        async with self.s.post(
+        s = await self.ensure_session()
+        async with s.post(
             f"{self.c.slskd_base_url}/api/v0/session",
             json={"username": self.c.slskd_user, "password": self.c.slskd_password},
             timeout=15,
@@ -153,20 +160,23 @@ class SlskdClient:
             r.raise_for_status()
             data = await r.json()
             self.token = data["token"]
-            self.s.headers.update({"Authorization": f"Bearer {self.token}"})
+            s.headers.update({"Authorization": f"Bearer {self.token}"})
 
     async def post(self, path: str, **kwargs):
-        async with self.s.post(f"{self.c.slskd_base_url}{path}", timeout=20, **kwargs) as r:
+        s = await self.ensure_session()
+        async with s.post(f"{self.c.slskd_base_url}{path}", timeout=20, **kwargs) as r:
             r.raise_for_status()
             return await r.json()
 
     async def get(self, path: str, **kwargs):
-        async with self.s.get(f"{self.c.slskd_base_url}{path}", timeout=20, **kwargs) as r:
+        s = await self.ensure_session()
+        async with s.get(f"{self.c.slskd_base_url}{path}", timeout=20, **kwargs) as r:
             r.raise_for_status()
             return await r.json()
 
     async def delete(self, path: str, **kwargs):
-        async with self.s.delete(f"{self.c.slskd_base_url}{path}", timeout=20, **kwargs) as r:
+        s = await self.ensure_session()
+        async with s.delete(f"{self.c.slskd_base_url}{path}", timeout=20, **kwargs) as r:
             if r.status not in (200, 204):
                 text = await r.text()
                 raise RuntimeError(f"delete failed {r.status}: {text}")
