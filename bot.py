@@ -312,6 +312,99 @@ class SoulmaneBot(discord.Client):
                 .strip()
             )
 
+    async def run_download_job_from_message(self, message: discord.Message, query: str):
+        status = await message.reply(f"🔎 Starting search for: `{query}`", mention_author=False)
+        job_id = self.db.create_job(query)
+        try:
+            await self.ensure_slskd_login()
+            sid = (await self.slskd.post("/api/v0/searches", json={
+                "searchText": query,
+                "filterResponses": False,
+                "searchTimeout": self.config.batch_search_timeout_ms,
+                "responseLimit": 300,
+                "fileLimit": 12000,
+            }))['id']
+
+            responses: list[dict[str, Any]] = []
+            deadline = time.time() + self.config.batch_response_wait_sec
+            while time.time() < deadline:
+                responses = await self.slskd.get(f"/api/v0/searches/{sid}/responses")
+                if responses:
+                    break
+                await asyncio.sleep(2)
+
+            if not responses:
+                self.db.set_job_state(job_id, "failed", "no responses")
+                await status.edit(content=f"❌ Job `{job_id}`: no responses for `{query}`")
+                return
+
+            picks = pick_candidates(responses, query, self.config.batch_max_users)
+            if not picks:
+                self.db.set_job_state(job_id, "failed", "no matching video candidates")
+                await status.edit(content=f"❌ Job `{job_id}`: no matching video candidates for `{query}`")
+                return
+
+            ids: list[tuple[str, str, str, int]] = []
+            for score, user, qlen, free, size, fn, f in picks:
+                payload = [{"filename": f["filename"], "size": f["size"]}]
+                data = await self.slskd.post(f"/api/v0/transfers/downloads/{quote(user, safe='')}", json=payload)
+                enq = data.get("enqueued") or []
+                if enq:
+                    tid = enq[0]["id"]
+                    ids.append((user, tid, fn, size))
+                    self.db.add_transfer(job_id, user, tid, fn, size)
+
+            if not ids:
+                self.db.set_job_state(job_id, "failed", "enqueue failed")
+                await status.edit(content=f"❌ Job `{job_id}`: failed to enqueue any transfer")
+                return
+
+            self.db.set_job_state(job_id, "queued")
+            await status.edit(content=f"📥 Job `{job_id}`: enqueued {len(ids)} candidates. Waiting for winner...")
+
+            winner = None
+            deadline = time.time() + self.config.batch_start_timeout_sec
+            while time.time() < deadline and not winner:
+                await asyncio.sleep(3)
+                all_dl = await self.slskd.get("/api/v0/transfers/downloads/")
+                m = extract_transfer_map(all_dl, {(u, i) for u, i, _, _ in ids})
+                for user, tid, fn, size in ids:
+                    f = m.get((user, tid))
+                    if not f:
+                        continue
+                    st = f.get("state") or "unknown"
+                    bt = int(f.get("bytesTransferred") or 0)
+                    self.db.update_transfer(user, tid, st, bt)
+                    if bt >= self.config.batch_min_start_bytes or "Completed, Succeeded" in st:
+                        winner = (user, tid, fn, bt, st)
+                        break
+
+            if winner:
+                wuser, wtid, wfn, wbytes, wstate = winner
+                self.db.set_winner(job_id, wuser, wtid, wfn)
+                for user, tid, fn, size in ids:
+                    if (user, tid) == (wuser, wtid):
+                        continue
+                    await self.slskd.delete(
+                        f"/api/v0/transfers/downloads/{quote(user, safe='')}/{tid}",
+                        params={"remove": "true"},
+                    )
+                self.db.set_job_state(job_id, "running", f"winner={wuser}:{wtid}")
+                await status.edit(content=(
+                    f"✅ Job `{job_id}` winner selected\n"
+                    f"• user: `{wuser}`\n"
+                    f"• transfer: `{wtid}`\n"
+                    f"• bytes: `{wbytes}`\n"
+                    f"• state: `{wstate}`\n"
+                    f"• file: `{wfn}`"
+                ))
+            else:
+                self.db.set_job_state(job_id, "stalled", "no winner reached threshold")
+                await status.edit(content=f"⚠️ Job `{job_id}`: no transfer reached min-bytes threshold in time. Left queued for manual review.")
+        except Exception as e:
+            self.db.set_job_state(job_id, "failed", str(e))
+            await status.edit(content=f"❌ Job `{job_id}` failed: `{e}`")
+
     async def on_message(self, message: discord.Message):
         if message.author.bot:
             return
@@ -321,6 +414,17 @@ class SoulmaneBot(discord.Client):
             return
 
         content = message.clean_content.replace(f"@{self.user.display_name}", "").strip()
+        lower = content.lower()
+
+        # Mention-based direct download flow (no CLI/tool-call required)
+        if "download" in lower:
+            idx = lower.find("download")
+            query = content[idx + len("download"):].strip(" :,-")
+            query = query.replace("for me", "").strip()
+            if query:
+                await self.run_download_job_from_message(message, query)
+                return
+
         if not content:
             content = "Hey Gary, give a short status and what commands are available."
 
