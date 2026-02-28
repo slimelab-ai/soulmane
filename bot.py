@@ -22,6 +22,7 @@ VIDEO_EXTS = {"mkv", "mp4", "avi", "m4v", "mov", "webm"}
 class Config:
     discord_token: str
     bot_name: str
+    discord_guild_id: int | None
     slskd_base_url: str
     slskd_user: str
     slskd_password: str
@@ -40,6 +41,7 @@ def cfg() -> Config:
     return Config(
         discord_token=token,
         bot_name=os.getenv("BOT_NAME", "soulmane").strip() or "soulmane",
+        discord_guild_id=(int(os.getenv("DISCORD_GUILD_ID")) if os.getenv("DISCORD_GUILD_ID") else None),
         slskd_base_url=os.getenv("SLSKD_BASE_URL", "http://127.0.0.1:5030").rstrip("/"),
         slskd_user=os.getenv("SLSKD_WEB_USERNAME", "gary"),
         slskd_password=os.getenv("SLSKD_WEB_PASSWORD", ""),
@@ -238,12 +240,20 @@ class SoulmaneBot(discord.Client):
 
     async def setup_hook(self):
         await self.slskd.login()
-        # Prevent stale registration/signature mismatches after updates.
+        # Register globally and (optionally) guild-scoped for instant availability.
         self.tree.clear_commands(guild=None)
         self.tree.add_command(self.download)
         self.tree.add_command(self.status)
         self.tree.add_command(self.cancel)
         await self.tree.sync()
+
+        if self.config.discord_guild_id:
+            guild = discord.Object(id=self.config.discord_guild_id)
+            self.tree.clear_commands(guild=guild)
+            self.tree.add_command(self.download, guild=guild)
+            self.tree.add_command(self.status, guild=guild)
+            self.tree.add_command(self.cancel, guild=guild)
+            await self.tree.sync(guild=guild)
 
     async def close(self):
         await self.slskd.close()
