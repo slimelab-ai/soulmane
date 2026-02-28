@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import shlex
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -286,10 +287,17 @@ class SoulmaneBot(discord.Client):
         await super().close()
 
     async def generate_reply(self, user_text: str) -> str:
+        tool_skill = (
+            "You can use one tool via exec. Use Qwen-style tool name `Bash`. "
+            "If a shell action is needed, reply with exactly: Bash: <command>. "
+            "Prefer slskd-batch-video for movie downloads, e.g. "
+            "Bash: slskd-batch-video \"Movie Title 1994\" --max-users 5 --start-timeout-sec 90. "
+            "If no command is needed, reply normally."
+        )
         payload = {
             "model": self.config.openai_model,
             "messages": [
-                {"role": "system", "content": self.config.persona_prompt},
+                {"role": "system", "content": self.config.persona_prompt + "\n\n" + tool_skill},
                 {
                     "role": "user",
                     "content": user_text,
@@ -312,98 +320,35 @@ class SoulmaneBot(discord.Client):
                 .strip()
             )
 
-    async def run_download_job_from_message(self, message: discord.Message, query: str):
-        status = await message.reply(f"🔎 Starting search for: `{query}`", mention_author=False)
-        job_id = self.db.create_job(query)
+    async def run_exec(self, command: str) -> str:
+        # Minimal safety: keep this bot focused on Soulseek workflow.
+        allowed_prefixes = (
+            "slskd-batch-video ",
+            "slskd-batch-video",
+            "python3 ",
+            "cat ",
+            "ls ",
+            "find ",
+        )
+        if not command.startswith(allowed_prefixes):
+            return "Blocked command. Allowed: slskd-batch-video, python3/cat/ls/find for diagnostics."
+
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            executable="/bin/bash",
+        )
         try:
-            await self.ensure_slskd_login()
-            sid = (await self.slskd.post("/api/v0/searches", json={
-                "searchText": query,
-                "filterResponses": False,
-                "searchTimeout": self.config.batch_search_timeout_ms,
-                "responseLimit": 300,
-                "fileLimit": 12000,
-            }))['id']
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=180)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return "Command timed out after 180s"
 
-            responses: list[dict[str, Any]] = []
-            deadline = time.time() + self.config.batch_response_wait_sec
-            while time.time() < deadline:
-                responses = await self.slskd.get(f"/api/v0/searches/{sid}/responses")
-                if responses:
-                    break
-                await asyncio.sleep(2)
-
-            if not responses:
-                self.db.set_job_state(job_id, "failed", "no responses")
-                await status.edit(content=f"❌ Job `{job_id}`: no responses for `{query}`")
-                return
-
-            picks = pick_candidates(responses, query, self.config.batch_max_users)
-            if not picks:
-                self.db.set_job_state(job_id, "failed", "no matching video candidates")
-                await status.edit(content=f"❌ Job `{job_id}`: no matching video candidates for `{query}`")
-                return
-
-            ids: list[tuple[str, str, str, int]] = []
-            for score, user, qlen, free, size, fn, f in picks:
-                payload = [{"filename": f["filename"], "size": f["size"]}]
-                data = await self.slskd.post(f"/api/v0/transfers/downloads/{quote(user, safe='')}", json=payload)
-                enq = data.get("enqueued") or []
-                if enq:
-                    tid = enq[0]["id"]
-                    ids.append((user, tid, fn, size))
-                    self.db.add_transfer(job_id, user, tid, fn, size)
-
-            if not ids:
-                self.db.set_job_state(job_id, "failed", "enqueue failed")
-                await status.edit(content=f"❌ Job `{job_id}`: failed to enqueue any transfer")
-                return
-
-            self.db.set_job_state(job_id, "queued")
-            await status.edit(content=f"📥 Job `{job_id}`: enqueued {len(ids)} candidates. Waiting for winner...")
-
-            winner = None
-            deadline = time.time() + self.config.batch_start_timeout_sec
-            while time.time() < deadline and not winner:
-                await asyncio.sleep(3)
-                all_dl = await self.slskd.get("/api/v0/transfers/downloads/")
-                m = extract_transfer_map(all_dl, {(u, i) for u, i, _, _ in ids})
-                for user, tid, fn, size in ids:
-                    f = m.get((user, tid))
-                    if not f:
-                        continue
-                    st = f.get("state") or "unknown"
-                    bt = int(f.get("bytesTransferred") or 0)
-                    self.db.update_transfer(user, tid, st, bt)
-                    if bt >= self.config.batch_min_start_bytes or "Completed, Succeeded" in st:
-                        winner = (user, tid, fn, bt, st)
-                        break
-
-            if winner:
-                wuser, wtid, wfn, wbytes, wstate = winner
-                self.db.set_winner(job_id, wuser, wtid, wfn)
-                for user, tid, fn, size in ids:
-                    if (user, tid) == (wuser, wtid):
-                        continue
-                    await self.slskd.delete(
-                        f"/api/v0/transfers/downloads/{quote(user, safe='')}/{tid}",
-                        params={"remove": "true"},
-                    )
-                self.db.set_job_state(job_id, "running", f"winner={wuser}:{wtid}")
-                await status.edit(content=(
-                    f"✅ Job `{job_id}` winner selected\n"
-                    f"• user: `{wuser}`\n"
-                    f"• transfer: `{wtid}`\n"
-                    f"• bytes: `{wbytes}`\n"
-                    f"• state: `{wstate}`\n"
-                    f"• file: `{wfn}`"
-                ))
-            else:
-                self.db.set_job_state(job_id, "stalled", "no winner reached threshold")
-                await status.edit(content=f"⚠️ Job `{job_id}`: no transfer reached min-bytes threshold in time. Left queued for manual review.")
-        except Exception as e:
-            self.db.set_job_state(job_id, "failed", str(e))
-            await status.edit(content=f"❌ Job `{job_id}` failed: `{e}`")
+        text = (out or b"").decode("utf-8", errors="replace").strip()
+        if len(text) > 1600:
+            text = text[-1600:]
+        return text or f"Command exited {proc.returncode} with no output"
 
     async def on_message(self, message: discord.Message):
         if message.author.bot:
@@ -414,17 +359,6 @@ class SoulmaneBot(discord.Client):
             return
 
         content = message.clean_content.replace(f"@{self.user.display_name}", "").strip()
-        lower = content.lower()
-
-        # Mention-based direct download flow (no CLI/tool-call required)
-        if "download" in lower:
-            idx = lower.find("download")
-            query = content[idx + len("download"):].strip(" :,-")
-            query = query.replace("for me", "").strip()
-            if query:
-                await self.run_download_job_from_message(message, query)
-                return
-
         if not content:
             content = "Hey Gary, give a short status and what commands are available."
 
@@ -432,6 +366,19 @@ class SoulmaneBot(discord.Client):
             reply = await self.generate_reply(content)
             if not reply:
                 reply = "🐌 I'm here. Try /download, /status, or /cancel."
+
+            if reply.startswith("Bash:") or reply.startswith("EXEC:"):
+                if reply.startswith("Bash:"):
+                    cmd = reply.split("Bash:", 1)[1].strip()
+                else:
+                    cmd = reply.split("EXEC:", 1)[1].strip()
+                run_out = await self.run_exec(cmd)
+                await message.reply(
+                    f"```bash\n$ {cmd}\n```\n```\n{run_out[:1800]}\n```",
+                    mention_author=False,
+                )
+                return
+
             await message.reply(reply[:1900], mention_author=False)
         except Exception as e:
             await message.reply(f"🐌 I hit an LLM error: {e}", mention_author=False)
