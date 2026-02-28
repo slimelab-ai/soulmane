@@ -240,13 +240,12 @@ class SoulmaneBot(discord.Client):
 
     async def setup_hook(self):
         await self.slskd.login()
-        # Register globally and (optionally) guild-scoped for instant availability.
+
+        # Hard reset global commands (keep empty) to avoid duplicate/stale signatures.
         self.tree.clear_commands(guild=None)
-        self.tree.add_command(self.download)
-        self.tree.add_command(self.status)
-        self.tree.add_command(self.cancel)
         await self.tree.sync()
 
+        # Register commands only at guild scope for instant updates and deterministic schema.
         if self.config.discord_guild_id:
             guild = discord.Object(id=self.config.discord_guild_id)
             self.tree.clear_commands(guild=guild)
@@ -254,6 +253,12 @@ class SoulmaneBot(discord.Client):
             self.tree.add_command(self.status, guild=guild)
             self.tree.add_command(self.cancel, guild=guild)
             await self.tree.sync(guild=guild)
+        else:
+            # Fallback if no guild configured.
+            self.tree.add_command(self.download)
+            self.tree.add_command(self.status)
+            self.tree.add_command(self.cancel)
+            await self.tree.sync()
 
     async def close(self):
         await self.slskd.close()
