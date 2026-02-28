@@ -238,8 +238,15 @@ class SoulmaneBot(discord.Client):
         self.db = JobsDB("jobs.db")
         self.slskd = SlskdClient(config)
 
+    async def ensure_slskd_login(self) -> None:
+        try:
+            await self.slskd.login()
+        except Exception as e:
+            raise RuntimeError(f"slskd auth failed: {e}") from e
+
     async def setup_hook(self):
-        await self.slskd.login()
+        # Do not block startup on slskd availability/auth.
+        # Slash commands must register even if slskd is temporarily unavailable.
 
         # Hard reset global commands (keep empty) to avoid duplicate/stale signatures.
         self.tree.clear_commands(guild=None)
@@ -271,6 +278,7 @@ class SoulmaneBot(discord.Client):
         job_id = self.db.create_job(query)
 
         try:
+            await self.ensure_slskd_login()
             sid = (await self.slskd.post("/api/v0/searches", json={
                 "searchText": query,
                 "filterResponses": False,
@@ -369,6 +377,7 @@ class SoulmaneBot(discord.Client):
     @app_commands.command(name="status", description="Show latest job or specific job status")
     async def status(self, interaction: discord.Interaction, job_id: int | None = None):
         await interaction.response.defer(thinking=True, ephemeral=True)
+        await self.ensure_slskd_login()
         job = self.db.job(job_id) if job_id else self.db.latest_job()
         if not job:
             await interaction.followup.send("No jobs yet.", ephemeral=True)
@@ -392,6 +401,7 @@ class SoulmaneBot(discord.Client):
     @app_commands.command(name="cancel", description="Cancel all transfers for a job")
     async def cancel(self, interaction: discord.Interaction, job_id: int):
         await interaction.response.defer(thinking=True)
+        await self.ensure_slskd_login()
         job = self.db.job(job_id)
         if not job:
             await interaction.followup.send(f"No such job `{job_id}`")
