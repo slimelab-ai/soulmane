@@ -238,6 +238,8 @@ class SoulmaneBot(discord.Client):
 
     async def setup_hook(self):
         await self.slskd.login()
+        # Prevent stale registration/signature mismatches after updates.
+        self.tree.clear_commands(guild=None)
         self.tree.add_command(self.download)
         self.tree.add_command(self.status)
         self.tree.add_command(self.cancel)
