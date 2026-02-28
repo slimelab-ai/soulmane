@@ -289,10 +289,10 @@ class SoulmaneBot(discord.Client):
     async def generate_reply(self, user_text: str) -> str:
         tool_skill = (
             "You can use one tool via exec. Use Qwen-style tool name `Bash`. "
-            "If a shell action is needed, reply with exactly: Bash: <command>. "
-            "Prefer slskd-batch-video for movie downloads, e.g. "
+            "If the user asks to download/search media, you MUST first output exactly one command as: Bash: <command>. "
+            "Use slskd-batch-video for download tasks, e.g. "
             "Bash: slskd-batch-video \"Movie Title 1994\" --max-users 5 --start-timeout-sec 90. "
-            "If no command is needed, reply normally."
+            "Only reply normally when no shell action is needed."
         )
         payload = {
             "model": self.config.openai_model,
@@ -366,6 +366,8 @@ class SoulmaneBot(discord.Client):
             reply = await self.generate_reply(content)
             if not reply:
                 reply = "🐌 I'm here. Try /download, /status, or /cancel."
+
+            print(f"[mention] model_reply={reply[:200]!r}")
 
             if reply.startswith("Bash:") or reply.startswith("EXEC:"):
                 if reply.startswith("Bash:"):
