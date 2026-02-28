@@ -2,28 +2,59 @@
 
 Discord + slskd automation bot for reliable Soulseek downloads.
 
-## Planned commands
-- `/download <query>`: batch enqueue multiple peers, pick first healthy transfer, cancel duplicates
-- `/status [query]`: show active job and transfer progress
-- `/cancel <job_id>`: cancel queued/in-progress transfers for a job
-
 ## One-liner onboarding (run as `gary`)
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/slimelab-ai/soulmane/master/scripts/onboard.sh)
 ```
 
-This will prompt for:
+This prompts for:
 - Discord token
-- Bot name
-- Soulseek creds (reuse existing or generate new)
+- bot name
+- Soulseek creds (reuse/generate)
 - slskd URL + web auth
-- local OpenAI-compatible model endpoint + model id
+- local OpenAI-compatible endpoint + model id
 
-Then it writes:
+It writes:
 - `~/.config/soulseek-credentials.env` (if generated)
 - `~/.local/share/soulmane/.env`
 
-## Status
-Repo initialized in `slimelab-ai/soulmane`.
-MVP scaffolding in progress.
+## Install + run
+
+```bash
+cd ~/.local/share/soulmane
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python bot.py
+```
+
+## Commands
+
+- `/download <query>`
+  - Runs slskd batch strategy: enqueue multiple peers, pick first healthy transfer, cancel the rest.
+  - Does **not** claim success without transfer evidence.
+- `/status [job_id]`
+  - Shows latest job (or specific job) state + transfer bytes/states.
+- `/cancel <job_id>`
+  - Cancels all tracked transfer IDs for that job.
+
+## Behavior guarantees
+
+- No fake "done" reports: job success is based on transfer state/bytes in slskd.
+- Duplicate control: once a winner starts (bytes threshold), the bot cancels other peers in that batch.
+- Audit trail: jobs + transfer IDs are stored in `jobs.db`.
+
+## Systemd user service (optional)
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp systemd/soulmane.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now soulmane
+systemctl --user status soulmane
+```
+
+## Environment
+
+See `.env.example` for all variables.
