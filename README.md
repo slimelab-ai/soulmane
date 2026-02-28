@@ -39,6 +39,12 @@ python bot.py
 - `/cancel <job_id>`
   - Cancels all tracked transfer IDs for that job.
 
+## Mention replies (personality mode)
+
+If you @mention the bot in chat, it replies using your local OpenAI-compatible LLM (`OPENAI_BASE_URL`, `OPENAI_MODEL`) with the configured `PERSONA_PROMPT`.
+
+**Important:** enable **Message Content Intent** for the Discord application, or mention replies won’t trigger.
+
 ## Behavior guarantees
 
 - No fake "done" reports: job success is based on transfer state/bytes in slskd.

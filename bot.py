@@ -27,6 +27,10 @@ class Config:
     slskd_user: str
     slskd_password: str
     ingress_root: str
+    openai_base_url: str
+    openai_api_key: str
+    openai_model: str
+    persona_prompt: str
     batch_max_users: int
     batch_search_timeout_ms: int
     batch_response_wait_sec: int
@@ -46,6 +50,13 @@ def cfg() -> Config:
         slskd_user=os.getenv("SLSKD_WEB_USERNAME", "gary"),
         slskd_password=os.getenv("SLSKD_WEB_PASSWORD", ""),
         ingress_root=os.getenv("INGRESS_ROOT", "/srv/media-ingress/gary"),
+        openai_base_url=os.getenv("OPENAI_BASE_URL", "http://127.0.0.1:8013/v1").rstrip("/"),
+        openai_api_key=os.getenv("OPENAI_API_KEY", "local-dev"),
+        openai_model=os.getenv("OPENAI_MODEL", "huihui-qwen3.5-35b-a3b-Q4_K_M.v2.gguf"),
+        persona_prompt=os.getenv(
+            "PERSONA_PROMPT",
+            "You are Gary, a wizard snail and media librarian. Be concise, practical, and friendly.",
+        ),
         batch_max_users=int(os.getenv("BATCH_MAX_USERS", "5")),
         batch_search_timeout_ms=int(os.getenv("BATCH_SEARCH_TIMEOUT_MS", "30000")),
         batch_response_wait_sec=int(os.getenv("BATCH_RESPONSE_WAIT_SEC", "20")),
@@ -232,6 +243,9 @@ def extract_transfer_map(transfers_payload: list[dict[str, Any]], wanted: set[tu
 class SoulmaneBot(discord.Client):
     def __init__(self, config: Config):
         intents = discord.Intents.default()
+        intents.message_content = True
+        intents.messages = True
+        intents.guilds = True
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
         self.config = config
@@ -270,6 +284,53 @@ class SoulmaneBot(discord.Client):
     async def close(self):
         await self.slskd.close()
         await super().close()
+
+    async def generate_reply(self, user_text: str) -> str:
+        payload = {
+            "model": self.config.openai_model,
+            "messages": [
+                {"role": "system", "content": self.config.persona_prompt},
+                {
+                    "role": "user",
+                    "content": user_text,
+                },
+            ],
+            "temperature": 0.4,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.config.openai_api_key}",
+            "Content-Type": "application/json",
+        }
+        s = await self.slskd.ensure_session()
+        async with s.post(f"{self.config.openai_base_url}/chat/completions", json=payload, headers=headers, timeout=45) as r:
+            r.raise_for_status()
+            data = await r.json()
+            return (
+                data.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+                .strip()
+            )
+
+    async def on_message(self, message: discord.Message):
+        if message.author.bot:
+            return
+        if self.user is None:
+            return
+        if self.user not in message.mentions:
+            return
+
+        content = message.clean_content.replace(f"@{self.user.display_name}", "").strip()
+        if not content:
+            content = "Hey Gary, give a short status and what commands are available."
+
+        try:
+            reply = await self.generate_reply(content)
+            if not reply:
+                reply = "🐌 I'm here. Try /download, /status, or /cancel."
+            await message.reply(reply[:1900], mention_author=False)
+        except Exception as e:
+            await message.reply(f"🐌 I hit an LLM error: {e}", mention_author=False)
 
     @app_commands.command(name="download", description="Download media via slskd batch (keep one winner, cancel duplicates)")
     async def download(self, interaction: discord.Interaction, query: str):
